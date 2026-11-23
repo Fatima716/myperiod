@@ -16,12 +16,21 @@ const TIPS = [
   {cat:'صحة',title:'الإفرازات الشفافة المطاطية تدل غالباً على قرب الإباضة',meta:'فهم الإفرازات'}
 ];
 const DEF = () => ({starts:[],logs:{},cycleLen:28,periodLen:5,height:'',weights:[],
-  habit:{since:null,history:[]},fast:{total:0,done:0},
+  ends:{},habit:{since:null,history:[],start:null,events:null},fast:{total:0,done:0},
   settings:{lock:false,pin:'',dark:false,hijri:true,before:true,fertile:true,daily:true,meds:false},updatedAt:0});
 
 let S;
 try { S = Object.assign(DEF(), JSON.parse(localStorage.getItem('myperiod') || '{}')); } catch (e) { S = DEF(); }
-S.settings = Object.assign(DEF().settings, S.settings);
+function fix() {
+  S.settings = Object.assign(DEF().settings, S.settings);
+  S.ends = S.ends || {};
+  const H = S.habit = Object.assign({since:null,history:[],start:null,events:null}, S.habit);
+  if (!H.events) {
+    H.events = (H.history || []).map((x, i) => ({id: i + 1, d: x.to, type: 'ممارسة', trig: [], note: '(من النسخة السابقة)'}));
+    if (!(H.history || []).length && H.since) H.start = H.since;
+  }
+}
+fix();
 const hasNative = () => typeof Android !== 'undefined';
 let afterT = null;
 function save(noSync) {
@@ -60,7 +69,7 @@ window.onCloud = (json, ts) => {
     if (json && ts > (S.updatedAt || 0)) {
       const c = JSON.parse(json), keep = S.settings;
       S = Object.assign(DEF(), c);
-      S.settings = Object.assign(DEF().settings, c.settings, {lock: keep.lock, pin: keep.pin});
+      S.settings = Object.assign(DEF().settings, c.settings, {lock: keep.lock, pin: keep.pin}); fix();
       S.updatedAt = ts; save(true); render(); toast('تمت مزامنة بياناتك');
     } else cloudUp();
   } catch (e) {}
@@ -99,11 +108,11 @@ function info() {
 }
 function dayType(d) {
   const c = cyc();
-  for (const s of c.st) { const k = diff(d, s); if (k >= 0 && k < S.periodLen) return 'period'; }
+  for (const s of c.st) { const k = diff(d, s); if (k >= 0 && k < periodLenOf(s)) return 'period'; }
   if (c.last) {
     for (let k = 1; k <= 8; k++) {
       const ns = add(c.last, c.avg * k);
-      const k1 = diff(d, ns); if (k1 >= 0 && k1 < S.periodLen) return 'pred';
+      const k1 = diff(d, ns); if (k1 >= 0 && k1 < plen()) return 'pred';
       const k2 = diff(d, add(ns, -14)); if (k2 >= -5 && k2 <= 0) return 'fertile';
     }
   }
@@ -114,18 +123,68 @@ function cycleDayOf(d) {
   for (const x of c.st) if (x <= d) s = x;
   return s ? diff(d, s) + 1 : null;
 }
+function plens() { const o = []; for (const s of Object.keys(S.ends)) { const l = diff(S.ends[s], s) + 1; if (l >= 1 && l <= 14) o.push(l); } return o; }
+function plen() { const o = plens(); return o.length ? Math.round(avgOf(o)) : S.periodLen; }
+function periodLenOf(s) { const e = S.ends[s]; return e ? diff(e, s) + 1 : plen(); }
+const dw = n => n === 1 ? 'يوم' : n === 2 ? 'يومين' : n <= 10 ? n + ' أيام' : n + ' يومًا';
+const bw = n => n === 1 ? 'بيوم واحد' : n === 2 ? 'بيومين' : 'بـ ' + dw(n);
+const devText = d => d === 0 ? 'جاءت في موعدها المتوقع تماماً' : d < 0 ? 'جاءت أبكر ' + bw(-d) : 'تأخرت ' + (d === 1 ? 'يوماً واحداً' : dw(d));
+function devs() {
+  const st = cyc().st, out = [];
+  for (let i = 1; i < st.length; i++) {
+    const gaps = []; for (let j = 1; j < i; j++) gaps.push(diff(st[j], st[j - 1]));
+    const ok = gaps.filter(x => x >= 18 && x <= 50);
+    const avg = ok.length ? Math.round(avgOf(ok)) : S.cycleLen;
+    const pred = add(st[i - 1], avg);
+    out.push({start: st[i], predicted: pred, dev: diff(st[i], pred), gap: diff(st[i], st[i - 1]), len: S.ends[st[i]] ? diff(S.ends[st[i]], st[i]) + 1 : null});
+  }
+  return out;
+}
+function addPeriodStart(d) {
+  if (!d || d > today()) { toast('تاريخ غير صالح'); return false; }
+  if (S.starts.includes(d)) { toast('هذه البداية مسجّلة مسبقاً'); return false; }
+  if (S.starts.some(x => Math.abs(diff(d, x)) < 10)) { toast('قريبة جداً من بداية دورة أخرى مسجّلة'); return false; }
+  const c = cyc(), pred = c.last && d > c.last ? add(c.last, c.avg) : null;
+  S.starts.push(d); S.starts.sort(); save();
+  const dv = pred ? diff(d, pred) : 0;
+  ui.msg = pred ? devText(dv) + (dv === 0 ? ' (' : ' عن التوقع (') + longDate(pred) + '). تم تحديث توقعاتك.' : '';
+  return true;
+}
+function setPeriodEnd(d) {
+  if (!d || d > today()) { toast('تاريخ غير صالح'); return false; }
+  const before = cyc().st.filter(x => x <= d), s = before[before.length - 1];
+  if (!s || diff(d, s) > 13) { toast('لا توجد بداية دورة قبل هذا التاريخ'); return false; }
+  const others = plens(); S.ends[s] = d; save();
+  const len = diff(d, s) + 1, usual = others.length ? Math.round(avgOf(others)) : S.periodLen;
+  ui.msg = 'استمرت دورتك ' + dw(len) + (len === usual ? '، وهذا المعتاد.' : len > usual ? '، أطول من المعتاد ' + bw(len - usual) + '.' : '، أقصر من المعتاد ' + bw(usual - len) + '.');
+  return true;
+}
+function logSummary(l) {
+  const p = [], pn = l.pain || {};
+  if (l.bleeding && l.bleeding !== 'لا يوجد') p.push('نزيف ' + l.bleeding);
+  if (l.discharge && l.discharge !== 'لا يوجد') p.push('إفرازات ' + l.discharge);
+  if ((l.symptoms || []).length) p.push(l.symptoms.join('، '));
+  if (pn.level > 0 || (pn.types || []).length) p.push('ألم ' + (pn.level || 0) + '/10' + ((pn.types || []).length ? ' (' + pn.types.join('، ') + ')' : ''));
+  if (l.mood) p.push('مزاج ' + l.mood);
+  if (l.sleep) p.push('نوم ' + l.sleep);
+  if (l.stress) p.push('توتر ' + l.stress);
+  if (l.note) p.push('«' + l.note + '»');
+  return p.join(' · ');
+}
 
 /* ---------- حالة الواجهة ---------- */
 let route = 'today';
 let draft = null;
-let ui = { month: new Date().getMonth(), year: new Date().getFullYear(), sel: today(), tab: 'sum', cat: 'الكل', n: 6, articles: null, fetched: false };
+let ui = { month: new Date().getMonth(), year: new Date().getFullYear(), sel: today(), tab: 'sum', cat: 'الكل', n: 6, articles: null, fetched: false, logDate: today(), back: '', msg: '', snooze: '', snoozeEnd: '' };
 const blankLog = () => ({bleeding:'',discharge:'',symptoms:[],mood:'',sleep:'',stress:'',note:'',pain:{types:[],level:0,triggers:[],helped:[]}});
 function ensureDraft() {
   if (!draft) {
-    const old = S.logs[today()];
+    const old = S.logs[ui.logDate];
     draft = old ? JSON.parse(JSON.stringify(Object.assign(blankLog(), old, {pain: Object.assign(blankLog().pain, old.pain || {})}))) : blankLog();
   }
 }
+const nextEvId = () => Math.max(0, ...S.habit.events.map(x => x.id || 0)) + 1;
+function ensureHDraft() { if (!draft || !draft.h) draft = {h: {id: 0, d: today(), type: '', trig: [], note: ''}}; }
 const getp = p => p.split('.').reduce((a, k) => a[k], draft);
 const setp = (p, v) => { const k = p.split('.'); const last = k.pop(); k.reduce((a, x) => a[x], draft)[last] = v; };
 
@@ -152,7 +211,7 @@ const ICON = {
   more: '<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>'
 };
 const NAME = {today:'اليوم',calendar:'التقويم',log:'تسجيل',insights:'تحليلات',more:'المزيد'};
-const TABOF = {pain:'log',body:'more',habit:'more',worship:'more',discover:'more',report:'more',account:'more',settings:'more'};
+const TABOF = {records:'more',pain:'log',body:'more',habit:'more',worship:'more',discover:'more',report:'more',account:'more',settings:'more'};
 const nav = () => {
   const cur = TABOF[route] || route;
   return '<nav aria-label="التنقل">' + Object.keys(NAME).map(k =>
@@ -174,7 +233,7 @@ V.today = () => {
   }
   const T = Math.max(i.avg, i.day), C = 691.15;
   const fr = x => (x / T) * C;
-  const pa = fr(S.periodLen), fs = Math.max(0, i.avg - 14 - 5), fl = fr(6);
+  const pa = fr(plen()), fs = Math.max(0, i.avg - 14 - 5), fl = fr(6);
   const ang = (Math.min(i.day, T) - 0.5) / T * 2 * Math.PI - Math.PI / 2;
   const mx = 130 + 110 * Math.cos(ang), my = 130 + 110 * Math.sin(ang);
   const type = dayType(t);
@@ -182,7 +241,11 @@ V.today = () => {
   if (type === 'period') { msg = 'أيام الدورة'; cls = 'pill pk'; }
   else if (type === 'fertile') msg = 'فرصة الحمل مرتفعة';
   const late = i.toNext < 0;
-  return h + `<div class="body" style="align-items:center">
+  let ask = '';
+  if (ui.msg) ask += `<div class="note tl" style="width:100%"><span>${esc(ui.msg)}</span><br><button class="chip" style="margin-top:8px" data-act="dismissMsg">حسناً</button></div>`;
+  if (i.toNext <= 0 && ui.snooze !== t) ask += `<div class="card" style="width:100%"><h2>هل جاءتك الدورة؟</h2><span class="mut">كانت متوقعة ${i.toNext === 0 ? 'اليوم' : 'منذ ' + dw(-i.toNext)}. إجابتك تجعل التوقعات أدق.</span><button class="btn" data-act="startPeriod">نعم، بدأت اليوم</button><label for="sb">أو بدأت في يوم سابق</label><input id="sb" type="date" max="${t}" data-in="lastStart"><button class="chip" data-act="snooze">لم تأتِ بعد</button></div>`;
+  if (i.day >= 2 && i.day <= 14 && !S.ends[i.last] && ui.snoozeEnd !== t) ask += `<div class="card" style="width:100%"><h2>هل انتهت دورتك؟</h2><span class="mut">اليوم ${i.day} من الدورة. سجّلي النهاية لأقارن مدتها بالمعتاد.</span><button class="btn" data-act="endToday">انتهت اليوم</button><label for="ed">أو انتهت في يوم سابق</label><input id="ed" type="date" min="${i.last}" max="${t}" data-in="endDate"><button class="chip" data-act="snoozeEnd">ما زالت مستمرة</button></div>`;
+  return h + `<div class="body" style="align-items:center">${ask}
     <div style="position:relative;width:260px;height:260px"><svg width="260" height="260" viewBox="0 0 260 260" role="img" aria-label="اليوم ${i.day} من الدورة">
       <g transform="rotate(-90 130 130)" fill="none" stroke-width="18">
       <circle cx="130" cy="130" r="110" stroke="var(--line)"/>
@@ -212,21 +275,28 @@ V.calendar = () => {
   }
   const ty = dayType(ui.sel), cd = cycleDayOf(ui.sel), lg = S.logs[ui.sel];
   let title = ty === 'period' ? 'أيام الدورة' : ty === 'pred' ? 'دورة متوقعة' : ty === 'fertile' ? 'فترة الخصوبة' : 'يوم عادي';
-  let body = lg ? 'يوجد تسجيل لهذا اليوم.' : 'لا توجد أعراض مسجّلة لهذا اليوم.';
-  const logged = S.starts.some(s => { const k = diff(ui.sel, s); return k >= 0 && k < S.periodLen; });
+  const sm = lg ? logSummary(lg) : '';
+  const body = lg ? (sm || 'سجل بدون تفاصيل') : 'لا توجد أعراض مسجّلة لهذا اليوم.';
+  const logged = S.starts.some(x => { const k = diff(ui.sel, x); return k >= 0 && k < periodLenOf(x); });
+  const bs = cyc().st.filter(x => x <= ui.sel), os = bs[bs.length - 1];
+  const canEnd = os && diff(ui.sel, os) >= 0 && diff(ui.sel, os) <= 13 && ui.sel <= t;
+  const past = ui.sel <= t;
   return head(y, MONTHS[m]) + `<div class="body">
     <div class="sp"><button class="chip" data-act="mon" data-n="-1" aria-label="الشهر السابق">السابق</button><button class="chip" data-act="mon" data-n="1" aria-label="الشهر التالي">التالي</button></div>
     <div class="card"><div class="cal">${cells}</div></div>
     <div class="sp mut" style="justify-content:center;gap:16px"><span>● أيام الدورة</span><span class="pink">● متوقعة</span><span class="teal">● الخصوبة</span></div>
-    <div class="card"><span class="mut">${longDate(ui.sel)}${cd ? ' · اليوم ' + cd + ' من الدورة' : ''}</span><b style="font-size:18px">${title}</b><span class="mut">${body}</span>
-      <button class="chip" data-act="${logged ? 'unmark' : 'mark'}" data-d="${ui.sel}">${logged ? 'إزالة بداية الدورة من هذا اليوم' : 'بدأت دورتي في هذا اليوم'}</button></div>
+    <div class="card"><span class="mut">${longDate(ui.sel)}${cd ? ' · اليوم ' + cd + ' من الدورة' : ''}</span><b style="font-size:18px">${title}</b><span class="mut">${esc(body)}</span>
+      ${past ? `<button class="chip" data-act="editLog" data-d="${ui.sel}">${lg ? 'عرض وتعديل سجل هذا اليوم' : 'تسجيل أعراض هذا اليوم'}</button>` : ''}
+      ${logged ? `<button class="chip" data-act="unmark" data-d="${ui.sel}">إزالة هذه الدورة من السجل</button>` : past ? `<button class="chip" data-act="mark" data-d="${ui.sel}">بدأت دورتي في هذا اليوم</button>` : ''}
+      ${canEnd ? `<button class="chip" data-act="markEnd" data-d="${ui.sel}">انتهت دورتي في هذا اليوم</button>` : ''}</div>
   </div>` + nav();
 };
 
 V.log = () => {
   ensureDraft();
   const g = (t, p, o, m) => `<div class="sec"><h2>${t}</h2>${chips(p, o, m)}</div>`;
-  return head(longDate(today()), 'كيف تشعرين اليوم؟') + `<div class="body">
+  return head(longDate(ui.logDate), ui.logDate === today() ? 'كيف تشعرين اليوم؟' : 'سجل يوم سابق') + `<div class="body">
+    <div class="sec"><label for="ld">تاريخ السجل</label><input id="ld" type="date" max="${today()}" value="${ui.logDate}" data-in="logDate"></div>
     ${g('النزيف', 'bleeding', ['لا يوجد','خفيف','متوسط','غزير'])}
     ${g('الإفرازات', 'discharge', ['لا يوجد','قليلة','كريمية','مائية','شفافة مطاطية'])}
     ${g('الأعراض', 'symptoms', ['تقلصات','صداع','انتفاخ','ألم الظهر','إرهاق','حب الشباب'], true)}
@@ -244,7 +314,7 @@ V.pain = () => {
   const ttl = lv === 0 ? ['لا ألم','لا تشعرين بألم.'] : lv <= 3 ? ['ألم خفيف','محتمل ولا يمنعك من أنشطتك.'] : lv <= 6 ? ['ألم متوسط','واضح وقد يحتاج إلى راحة.'] : lv <= 8 ? ['ألم شديد','يصعّب أنشطتك. إن تكرر كل دورة فاذكريه لطبيبتك.'] : ['ألم شديد جداً','إن كان لا يُحتمل أو جديداً عليك فراجعي طبيبة.'];
   const vag = draft.pain.types.some(t => VAGINAL.indexOf(t) >= 0);
   const lvl = Array.from({length: 11}, (_, n) => `<button class="chip ${n === lv ? 'on' : ''}" style="padding:0" data-act="lvl" data-n="${n}" aria-pressed="${n === lv}" aria-label="مستوى الألم ${n}">${n}</button>`).join('');
-  return head(longDate(today()), 'الألم') + `<div class="body">
+  return head(longDate(ui.logDate), 'الألم') + `<div class="body">
     <div class="sec"><h2>نوع الألم ومكانه</h2>${chips('pain.types', PAIN_TYPES, true)}</div>
     ${vag ? '<div class="note">إن استمر ألم المهبل أو الحرقان أو صاحبه إفراز كريه الرائحة أو حمى أو نزيف غير معتاد، فراجعي طبيبة. هذا التطبيق لا يشخّص.</div>' : ''}
     <div class="sec"><h2>مستوى الألم من 0 إلى 10</h2><div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px">${lvl}</div>
@@ -271,9 +341,15 @@ V.insights = () => {
   if (ui.tab === 'sum') {
     const gaps = c.gaps.slice(-6);
     const mx = Math.max(35, ...gaps);
+    const spread = gaps.length > 1 ? Math.max(...gaps) - Math.min(...gaps) : null;
+    const reg = spread === null ? 'تحتاجين دورتين مسجّلتين على الأقل لحساب الانتظام.' : spread <= 7 ? 'دورتك منتظمة (الفرق بين أقصر وأطول دورة ' + dw(spread) + ').' : 'دورتك متفاوتة (الفرق بين أقصر وأطول دورة ' + dw(spread) + ').';
+    const inf = info();
+    const dv = devs().slice(-6).reverse();
     b = `<div class="row"><div class="card"><span class="mut">متوسط الدورة</span><span class="big pink">${c.avg} <small class="mut">يومًا</small></span></div>
-      <div class="card"><span class="mut">مدة النزيف</span><span class="big teal">${S.periodLen} <small class="mut">أيام</small></span></div></div>
+      <div class="card"><span class="mut">مدة النزيف</span><span class="big teal">${plen()} <small class="mut">أيام</small></span></div></div>
       <div class="card"><h2>طول آخر الدورات (أيام)</h2>${gaps.length ? `<div class="bars">${gaps.map(g => `<div>${g}<i style="height:${Math.round(g / mx * 100)}px"></i></div>`).join('')}</div>` : '<span class="mut">تحتاجين تسجيل دورتين على الأقل لرؤية الرسم.</span>'}</div>
+      <div class="card"><h2>الانتظام والتوقع</h2><span class="mut">${reg}</span>${inf ? `<b>الدورة القادمة المتوقعة: ${longDate(inf.next)}${spread !== null ? ' (قد تختلف ±' + Math.max(1, Math.round(spread / 2)) + ' يوم)' : ''}</b>` : ''}</div>
+      <div class="card"><h2>التوقع مقابل الواقع</h2>${dv.length ? dv.map(x => `<div class="sp"><span>${longDate(x.start)}</span><span class="pill ${x.dev === 0 ? '' : 'pk'}">${devText(x.dev)}${x.len ? ' · نزيف ' + dw(x.len) : ''}</span></div>`).join('') : '<span class="mut">سجّلي دورتين على الأقل، وبعد كل دورة سأقارن موعدها الفعلي بالتوقع.</span>'}</div>
       ${linkBtn('report', 'تقرير الطبيبة', 'ملخص للمشاركة')}${linkBtn('body', 'كتلة الجسم', 'الوزن والطول')}`;
   } else {
     const symC = {}, nCycWith = cycles.filter(x => x.length).length;
@@ -298,7 +374,7 @@ V.more = () => head('كل ما تحتاجينه', 'المزيد') + `<div class=
   ${linkBtn('discover', 'اكتشفي', 'نصائح ومقالات')}${linkBtn('body', 'كتلة الجسم', 'الطول والوزن')}
   ${linkBtn('habit', 'تحدّيي', 'خاص ومحمي بالرقم السري')}${linkBtn('worship', 'الصيام والصلاة', 'قضاء أيام رمضان وأيام الانقطاع')}
   ${linkBtn('report', 'تقرير الطبيبة', 'ملخص للمشاركة')}${linkBtn('account', 'الحساب والخصوصية', 'قفل ونسخة احتياطية ومزامنة')}
-  ${linkBtn('settings', 'الإعدادات', 'المظهر والدورة')}</div>` + nav();
+  ${linkBtn('records', 'سجلاتي وبياناتي القديمة', 'عرض وتعديل وإضافة بيانات سابقة')}${linkBtn('settings', 'الإعدادات', 'المظهر والدورة')}</div>` + nav();
 
 V.body = () => {
   const w = S.weights[S.weights.length - 1];
@@ -306,11 +382,12 @@ V.body = () => {
   return head('الجسم', 'كتلة الجسم') + `<div class="body">
     <div class="row"><div class="sec"><label for="h">الطول (سم)</label><input id="h" inputmode="decimal" value="${esc(S.height)}" data-in="height"></div>
     <div class="sec"><label for="w">الوزن (كغ)</label><input id="w" inputmode="decimal" value="${w ? esc(w.w) : ''}" data-in="weight"></div></div>
+    <div class="sec"><label for="wd">تاريخ القياس</label><input id="wd" type="date" max="${today()}" value="${today()}"></div>
     <div class="card"><div class="sp"><span class="big pink" style="font-size:44px" id="bmiV">${r.v}</span><span class="pill" id="bmiC">${r.c}</span></div>
       <div class="bmi"><div class="bar"><div style="flex:17.5;background:var(--tealbg)"></div><div style="flex:32.5;background:var(--teal)"></div><div style="flex:25;background:#F2C9A0"></div><div style="flex:25;background:var(--pink)"></div></div><div class="pin" id="bmiP" style="right:${r.p}%"></div></div>
       <div class="sp mut"><span>نحافة</span><span>طبيعي</span><span>زيادة</span><span>سمنة</span></div>
       <span class="mut">المؤشر تقريبي ولا يصلح وحده للحكم على صحتك. اسألي طبيبتك عن الوزن المناسب.</span></div>
-    ${S.weights.length ? `<div class="card"><h2>آخر قياسات الوزن (كغ)</h2><div class="sp mut" style="flex-wrap:wrap;justify-content:flex-start">${S.weights.slice(-6).map(x => `<span class="pill">${esc(x.w)}</span>`).join('')}</div></div>` : ''}
+    ${S.weights.length ? `<div class="card"><h2>آخر قياسات الوزن (كغ)</h2><div class="sp mut" style="flex-wrap:wrap;justify-content:flex-start">${S.weights.slice(-6).map(x => `<span class="pill">${esc(x.w)} · ${esc(x.d.slice(5))}</span>`).join('')}</div></div>` : ''}
     <button class="btn" data-act="saveBody">حفظ القياس</button></div>` + nav();
 };
 function bmiOf(h, w) {
@@ -320,18 +397,55 @@ function bmiOf(h, w) {
   return { v: v.toFixed(1), c: v < 18.5 ? 'نحافة' : v < 25 ? 'وزن طبيعي' : v < 30 ? 'زيادة وزن' : 'سمنة', p: Math.max(0, Math.min(1, (v - 15) / 20)) * 100 };
 }
 
-V.habit = () => {
+const HT = ['ممارسة','تفكير أو رغبة','محاولة إيقاف','تغلّبت على الرغبة','أخرى'];
+const HP = 'ممارسة';
+const HTRIG = ['ملل','وحدة','توتر','ليلاً','محتوى مثير','أخرى'];
+function habitStats() {
   const H = S.habit, t = today();
-  if (!H.since) return head('خاص', 'تحدّيي') + `<div class="body"><div class="card"><h2>تتبّع خاص بك</h2><span class="mut">يحسب عدد الأيام التي تغلّبتِ فيها على العادة والفاصل بين كل مرتين. بياناتك على جهازك فقط. لا لوم هنا.</span></div><button class="btn teal" data-act="habitStart">ابدئي التحدي</button></div>` + nav();
-  const days = diff(t, H.since), hist = H.history.map(x => x.len);
-  const best = Math.max(days, ...hist, 0), avg = hist.length ? Math.round(avgOf(hist)) : 0;
-  const msg = days === 0 ? 'بداية جديدة تُحسب لك. المهم أن تعودي للمحاولة.' : days < 7 ? 'بداية جيدة، استمرّي.' : days >= 30 ? 'وصلتِ إلى هدفك. أحسنتِ!' : 'كل يوم تتغلّبين فيه هو إنجاز حقيقي.';
-  return head('خاص', 'تحدّيي') + `<div class="body">
-    <div class="card" style="background:var(--teal);border-color:var(--teal);color:#fff"><span>أيام التغلّب على العادة</span><span style="font-size:60px;font-weight:800;line-height:1">${days}</span><span>${msg}</span><div class="meter" style="background:rgba(255,255,255,.3)"><i style="background:#fff;width:${Math.min(100, days / 30 * 100)}%"></i></div><span>الهدف: 30 يومًا</span></div>
-    <div class="row"><div class="card"><span class="mut">أطول فترة</span><span class="big teal">${best}</span></div><div class="card"><span class="mut">متوسط الفاصل</span><span class="big teal">${avg}</span></div><div class="card"><span class="mut">مرات العودة</span><span class="big pink">${hist.length}</span></div></div>
-    ${hist.length ? `<div class="card"><h2>الفترات السابقة (أيام)</h2><div class="bars">${hist.slice(-6).map(v => `<div>${v}<i style="height:${Math.max(4, Math.min(110, v * 4))}px;background:var(--teal)"></i></div>`).join('')}</div></div>` : ''}
-    <button class="btn ghost" data-act="habitRelapse">سجّلي أنني عدت للعادة</button>
+  const P = [...new Set(H.events.filter(e => e.type === HP).map(e => e.d))].sort();
+  const pts = (H.start ? [H.start] : []).concat(P).sort();
+  const gaps = []; for (let i = 1; i < pts.length; i++) if (diff(pts[i], pts[i - 1]) > 0) gaps.push(diff(pts[i], pts[i - 1]));
+  const last = pts[pts.length - 1] || null;
+  return { P, gaps, last, days: last ? diff(t, last) : 0, started: !!last };
+}
+V.habit = () => {
+  ensureHDraft();
+  const H = S.habit, t = today(), st = habitStats(), f = draft.h;
+  const recent = k => H.events.filter(e => e.type === k && diff(t, e.d) <= 29).length;
+  const best = Math.max(st.days, ...st.gaps, 0), avg = st.gaps.length ? Math.round(avgOf(st.gaps)) : 0;
+  const msg = st.days === 0 ? 'بداية جديدة تُحسب لك. المهم أن تعودي للمحاولة.' : st.days < 7 ? 'بداية جيدة، استمرّي.' : st.days >= 30 ? 'وصلتِ إلى هدفك. أحسنتِ!' : 'كل يوم تتغلّبين فيه هو إنجاز حقيقي.';
+  const trg = {}; H.events.filter(e => e.type === HP).forEach(e => (e.trig || []).forEach(x => trg[x] = (trg[x] || 0) + 1));
+  const topT = Object.entries(trg).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  const top = st.started
+    ? `<div class="card" style="background:var(--teal);border-color:var(--teal);color:#fff"><span>أيام التغلّب على العادة</span><span style="font-size:60px;font-weight:800;line-height:1">${st.days}</span><span>${msg}</span><div class="meter" style="background:rgba(255,255,255,.3)"><i style="background:#fff;width:${Math.min(100, st.days / 30 * 100)}%"></i></div><span>الهدف: 30 يومًا</span></div>
+      <div class="row"><div class="card"><span class="mut">أطول فترة</span><span class="big teal">${best}</span></div><div class="card"><span class="mut">متوسط الفاصل</span><span class="big teal">${avg}</span></div></div>`
+    : `<div class="card"><h2>تتبّع خاص بك</h2><span class="mut">يحسب الأيام التي تغلّبتِ فيها والفاصل بين كل مرتين، ويحفظ ملاحظاتك عن الممارسة أو التفكير أو محاولات الإيقاف. بياناتك على جهازك فقط. لا لوم هنا.</span><button class="btn teal" data-act="habitStart">ابدئي العدّ من اليوم</button><label for="hl">أو اختاري تاريخ آخر ممارسة</label><input id="hl" type="date" max="${t}" data-in="habitLast"></div>`;
+  const evs = [...H.events].sort((a, b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0).slice(0, 30);
+  return head('خاص', 'تحدّيي') + `<div class="body">${top}
+    <div class="card"><h2>آخر 30 يومًا</h2><div class="chips">${HT.map(k => `<span class="pill ${k === HP ? 'pk' : ''}">${k}: ${recent(k)}</span>`).join('')}</div></div>
+    ${topT.length ? `<div class="card"><h2>ما يسبق الممارسة غالباً</h2><div class="chips">${topT.map(([k, n]) => `<span class="pill pk">${esc(k)} · ${n}</span>`).join('')}</div></div>` : ''}
+    ${st.gaps.length ? `<div class="card"><h2>الفترات بين الممارسات (أيام)</h2><div class="bars">${st.gaps.slice(-6).map(v => `<div>${v}<i style="height:${Math.max(4, Math.min(110, v * 4))}px;background:var(--teal)"></i></div>`).join('')}</div></div>` : ''}
+    <div class="card"><h2>${f.id ? 'تعديل حدث' : 'إضافة حدث'}</h2>
+      <label for="hd">التاريخ (يمكنك اختيار يوم قديم)</label><input id="hd" type="date" max="${t}" value="${esc(f.d)}" data-in="hDate">
+      <div class="sec"><h2>ماذا حدث؟</h2>${chips('h.type', HT, false)}</div>
+      <div class="sec"><h2>ما الذي سبقه؟</h2>${chips('h.trig', HTRIG, true)}</div>
+      <label for="hn">ملاحظات</label><textarea id="hn" rows="3" placeholder="اكتبي ما تريدين تذكّره…" data-in="hNote">${esc(f.note)}</textarea>
+      <button class="btn teal" data-act="saveEvent">حفظ</button>${f.id ? '<button class="btn ghost" data-act="cancelEvent">إلغاء التعديل</button>' : ''}</div>
+    <div class="card"><h2>السجل</h2>${evs.length ? evs.map(e => `<div class="sec" style="border-top:1px solid var(--line);padding-top:10px"><div class="sp"><span class="pill ${e.type === HP ? 'pk' : ''}">${esc(e.type)}</span><span class="mut">${longDate(e.d)}</span></div>${(e.trig || []).length ? `<span class="mut">قبلها: ${esc(e.trig.join('، '))}</span>` : ''}${e.note ? `<span>${esc(e.note)}</span>` : ''}<div class="chips"><button class="chip" style="min-height:36px;padding:0 12px" data-act="editEvent" data-id="${e.id}">تعديل</button><button class="chip" style="min-height:36px;padding:0 12px" data-act="delEvent" data-id="${e.id}">حذف</button></div></div>`).join('') : '<span class="mut">لا أحداث بعد.</span>'}</div>
     <span class="mut" style="text-align:center">التتبّع لفهم ما يسبق العودة، وليس للحكم عليك.</span></div>` + nav();
+};
+
+V.records = () => {
+  const c = cyc(), t = today();
+  const periods = c.st.slice().reverse().map(x => { const e = S.ends[x]; return `<div class="sp"><span><b>${longDate(x)}</b><br><span class="mut">${e ? 'إلى ' + longDate(e) + ' (' + dw(diff(e, x) + 1) + ')' : 'لم تُسجَّل نهايتها'}</span></span><button class="chip" style="min-height:36px;padding:0 12px" data-act="delPeriod" data-s="${x}">حذف</button></div>`; }).join('');
+  const logsH = Object.keys(S.logs).sort().reverse().map(d => { const sm = logSummary(S.logs[d]), cd = cycleDayOf(d); return `<div class="card"><div class="sp"><b>${longDate(d)}${cd ? ' · يوم ' + cd : ''}</b><span style="display:flex;gap:6px"><button class="chip" style="min-height:36px;padding:0 12px" data-act="editLog" data-d="${d}">تعديل</button><button class="chip" style="min-height:36px;padding:0 12px" data-act="delLog" data-d="${d}">حذف</button></span></div><span class="mut">${esc(sm || 'بدون تفاصيل')}</span></div>`; }).join('');
+  return head('كل ما سجّلتِه', 'سجلاتي') + `<div class="body">
+    <div class="card"><h2>إضافة دورة سابقة</h2><span class="mut">أدخلي دورات قديمة ليتعلّم التطبيق من تاريخك وتتحسن التوقعات.</span>
+      <label for="ops">بداية الدورة</label><input id="ops" type="date" max="${t}"><label for="ope">نهايتها (اختياري)</label><input id="ope" type="date" max="${t}"><button class="btn" data-act="addOld">إضافة</button></div>
+    <div class="card"><h2>تسجيل يوم سابق</h2><span class="mut">أعراض أو ألم أو ملاحظات ليوم قديم.</span><input id="opd" type="date" max="${t}" aria-label="تاريخ اليوم"><button class="btn ghost" data-act="openOldDay">فتح سجل هذا اليوم</button></div>
+    ${linkBtn('habit', 'تحدّيي', 'أضيفي أحداثاً قديمة بتاريخها')}${linkBtn('body', 'كتلة الجسم', 'أضيفي قياسات قديمة بتاريخها')}
+    ${periods ? `<div class="card"><h2>الدورات المسجّلة</h2>${periods}</div>` : ''}
+    <h2 style="margin:4px 0 0;font-size:16px">سجلات الأيام</h2>${logsH || '<span class="mut">لا سجلات بعد.</span>'}</div>` + nav();
 };
 
 V.worship = () => {
@@ -366,7 +480,7 @@ function reportText() {
   const w = S.weights[S.weights.length - 1], b = bmiOf(S.height, w ? w.w : '');
   return ['ملخص الدورة الشهرية — ' + longDate(today()),
     'متوسط طول الدورة: ' + (gaps.length ? Math.round(avgOf(gaps)) : c.avg) + ' يومًا',
-    'مدة النزيف: ' + S.periodLen + ' أيام',
+    'مدة النزيف: ' + plen() + ' أيام',
     gaps.length ? 'الانتظام: بين ' + Math.min(...gaps) + ' و' + Math.max(...gaps) + ' يومًا' : 'الانتظام: لا بيانات كافية',
     'أكثر الأعراض تكراراً: ' + (top.join('، ') || 'لا بيانات'),
     'متوسط مستوى الألم: ' + (lv.length ? avgOf(lv).toFixed(1) + ' من 10' : 'لا بيانات'),
@@ -422,18 +536,21 @@ function render() {
   document.getElementById('app').innerHTML = fn();
   const nb = document.querySelector('.body'); if (nb) nb.scrollTop = top;
 }
-function go(r) { if (r !== 'log' && r !== 'pain') draft = null; route = r; render(); }
+const G = {log: 'log', pain: 'log', habit: 'habit'};
+function go(r) { if (!G[r] || G[r] !== G[route]) draft = null; if (r !== 'today') ui.msg = ''; route = r; render(); }
 window.goBack = () => {
   if (document.getElementById('lock').hidden === false) return true;
+  if (route === 'log' && ui.back) { const b = ui.back; ui.back = ''; go(b); return true; }
   if (route === 'pain') { go('log'); return true; }
   if (route !== 'today') { go(TABOF[route] === 'more' ? 'more' : 'today'); return true; }
   return false;
 };
 
 function saveLog() {
-  const d = today(); const l = draft;
-  S.logs[d] = l;
-  save(); draft = null; toast('تم الحفظ'); go('today');
+  const d = ui.logDate, l = draft;
+  if (logSummary(l)) S.logs[d] = l; else delete S.logs[d];
+  save(); toast('تم الحفظ');
+  const b = ui.back; ui.back = ''; go(b || 'today');
 }
 function lockScreen() {
   const L = document.getElementById('lock');
@@ -444,7 +561,7 @@ function lockScreen() {
 }
 
 const A = {
-  go: el => go(el.dataset.to),
+  go: el => { const to = el.dataset.to; if (to === 'log' && route !== 'pain' && route !== 'log') { ui.logDate = today(); draft = null; ui.back = ''; } go(to); },
   chip: el => {
     const k = el.dataset.k, v = el.dataset.v;
     if (el.dataset.m === '1') { const a = getp(k), i = a.indexOf(v); i >= 0 ? a.splice(i, 1) : a.push(v); }
@@ -453,15 +570,42 @@ const A = {
   },
   lvl: el => { draft.pain.level = +el.dataset.n; render(); },
   saveLog,
-  startPeriod: () => { const t = today(); const c = cyc(); if (!c.last || diff(t, c.last) > 3) { S.starts.push(t); save(); toast('تم تسجيل بداية الدورة'); } else toast('بداية الدورة مسجّلة مسبقاً'); render(); },
+  startPeriod: () => { if (addPeriodStart(today())) toast(ui.msg || 'تم تسجيل بداية الدورة'); render(); },
   pick: el => { ui.sel = el.dataset.d; render(); },
   mon: el => { let m = ui.month + +el.dataset.n, y = ui.year; if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; } ui.month = m; ui.year = y; render(); },
-  mark: el => { if (!S.starts.includes(el.dataset.d)) S.starts.push(el.dataset.d); S.starts.sort(); save(); render(); },
-  unmark: el => { const d = el.dataset.d; S.starts = S.starts.filter(s => { const k = diff(d, s); return !(k >= 0 && k < S.periodLen); }); save(); render(); },
+  mark: el => { if (addPeriodStart(el.dataset.d)) toast(ui.msg || 'تم تسجيل بداية الدورة'); render(); },
+  unmark: el => { const d = el.dataset.d; const x = S.starts.find(y => { const k = diff(d, y); return k >= 0 && k < periodLenOf(y); }); if (x) { S.starts = S.starts.filter(y => y !== x); delete S.ends[x]; save(); } render(); },
   tab: el => { ui.tab = el.dataset.t; render(); },
-  saveBody: () => { const w = document.getElementById('w').value; if (parseFloat(w) > 0) S.weights.push({d: today(), w}); save(); toast('تم حفظ القياس'); render(); },
-  habitStart: () => { S.habit.since = today(); save(); render(); },
-  habitRelapse: () => { const d = diff(today(), S.habit.since); S.habit.history.push({from: S.habit.since, to: today(), len: d}); S.habit.since = today(); save(); render(); },
+  saveBody: () => { const w = document.getElementById('w').value, d = (document.getElementById('wd') || {}).value || today(); if (parseFloat(w) > 0) { S.weights = S.weights.filter(x => x.d !== d); S.weights.push({d, w}); S.weights.sort((a, b) => a.d < b.d ? -1 : 1); } save(); toast('تم حفظ القياس'); render(); },
+  dismissMsg: () => { ui.msg = ''; render(); },
+  snooze: () => { ui.snooze = today(); render(); },
+  snoozeEnd: () => { ui.snoozeEnd = today(); render(); },
+  endToday: () => { if (setPeriodEnd(today())) toast(ui.msg); render(); },
+  markEnd: el => { if (setPeriodEnd(el.dataset.d)) toast(ui.msg); render(); },
+  editLog: el => { ui.logDate = el.dataset.d; ui.back = route; draft = null; go('log'); },
+  delLog: el => { if (confirm('حذف سجل هذا اليوم؟')) { delete S.logs[el.dataset.d]; save(); render(); } },
+  delPeriod: el => { if (confirm('حذف هذه الدورة من السجل؟')) { const x = el.dataset.s; S.starts = S.starts.filter(y => y !== x); delete S.ends[x]; save(); render(); } },
+  addOld: () => {
+    const a = document.getElementById('ops').value, e = document.getElementById('ope').value;
+    if (!a) { toast('اختاري تاريخ البداية'); return; }
+    if (e && e < a) { toast('النهاية قبل البداية'); return; }
+    if (!addPeriodStart(a)) return;
+    const ok = e ? setPeriodEnd(e) : true; ui.msg = '';
+    if (ok) toast('تمت إضافة الدورة'); render();
+  },
+  openOldDay: () => { const d = document.getElementById('opd').value; if (!d) { toast('اختاري التاريخ'); return; } ui.logDate = d; ui.back = 'records'; draft = null; go('log'); },
+  habitStart: () => { S.habit.start = today(); save(); render(); },
+  saveEvent: () => {
+    const h = draft && draft.h; if (!h) return;
+    if (!h.type) { toast('اختاري ماذا حدث'); return; }
+    if (!h.d || h.d > today()) { toast('تاريخ غير صالح'); return; }
+    const ev = {id: h.id || nextEvId(), d: h.d, type: h.type, trig: h.trig.slice(), note: h.note};
+    S.habit.events = S.habit.events.filter(x => x.id !== ev.id).concat([ev]).sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : 0);
+    save(); draft = null; toast('تم الحفظ'); render();
+  },
+  cancelEvent: () => { draft = null; render(); },
+  editEvent: el => { const e = S.habit.events.find(x => x.id === +el.dataset.id); if (e) { draft = {h: JSON.parse(JSON.stringify(Object.assign({trig: [], note: ''}, e)))}; render(); const b = document.querySelector('.body'); if (b) b.scrollTop = 0; } },
+  delEvent: el => { if (confirm('حذف هذا الحدث؟')) { S.habit.events = S.habit.events.filter(x => x.id !== +el.dataset.id); save(); render(); } },
   fastDone: () => { if (S.fast.done < S.fast.total) S.fast.done++; save(); render(); },
   cat: el => { ui.cat = el.dataset.c; render(); },
   rn: el => { ui.n = +el.dataset.n; render(); },
@@ -473,8 +617,8 @@ const A = {
   signOut: () => { Android.signOut(); ui.email = ''; toast('تم تسجيل الخروج'); render(); },
   syncNow: () => { Android.syncDown(); },
   backup: () => shareText(JSON.stringify(S)),
-  restore: () => { try { const j = JSON.parse(document.getElementById('imp').value); S = Object.assign(DEF(), j); save(); toast('تمت الاستعادة'); render(); } catch (e) { toast('النسخة غير صالحة'); } },
-  wipe: () => { if (confirm('حذف كل بياناتك نهائياً؟')) { S = DEF(); save(); draft = null; toast('تم الحذف'); go('today'); } },
+  restore: () => { try { const j = JSON.parse(document.getElementById('imp').value); S = Object.assign(DEF(), j); fix(); save(); toast('تمت الاستعادة'); render(); } catch (e) { toast('النسخة غير صالحة'); } },
+  wipe: () => { if (confirm('حذف كل بياناتك نهائياً؟')) { S = DEF(); fix(); save(); draft = null; toast('تم الحذف'); go('today'); } },
   sw: el => {
     const k = el.dataset.k;
     if (k === 'lock') {
@@ -496,7 +640,12 @@ document.addEventListener('input', e => {
   else if (k === 'fastTotal') { S.fast.total = Math.max(0, parseInt(v) || 0); save(); }
   else if (k === 'cycleLen') { const n = parseInt(v); if (n >= 18 && n <= 50) { S.cycleLen = n; save(); } }
   else if (k === 'periodLen') { const n = parseInt(v); if (n >= 1 && n <= 12) { S.periodLen = n; save(); } }
-  else if (k === 'lastStart') { if (v) { S.starts.push(v); S.starts.sort(); save(); render(); } }
+  else if (k === 'lastStart') { if (v && addPeriodStart(v)) { toast(ui.msg || 'تم تسجيل بداية الدورة'); render(); } }
+  else if (k === 'endDate') { if (v && setPeriodEnd(v)) { toast(ui.msg); render(); } }
+  else if (k === 'logDate') { if (v && v <= today()) { ui.logDate = v; draft = null; render(); } }
+  else if (k === 'hDate') { if (draft && draft.h) draft.h.d = v; }
+  else if (k === 'hNote') { if (draft && draft.h) draft.h.note = v; }
+  else if (k === 'habitLast') { if (v && v <= today()) { S.habit.events.push({id: nextEvId(), d: v, type: HP, trig: [], note: ''}); save(); render(); } }
 });
 
 lockScreen();
