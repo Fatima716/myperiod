@@ -181,6 +181,14 @@ function logSummary(l) {
   const p = [], pn = l.pain || {};
   if (l.bleeding && l.bleeding !== 'لا يوجد') p.push('نزيف ' + l.bleeding);
   if (l.discharge && l.discharge !== 'لا يوجد') p.push('إفرازات ' + l.discharge);
+  if (l.dcolor) p.push('لون الإفرازات ' + l.dcolor);
+  if (l.smell && l.smell !== 'عادية') p.push('رائحة ' + l.smell);
+  if (l.energy) p.push('نشاط ' + l.energy);
+  if (l.appetite) p.push('شهية ' + l.appetite);
+  if ((l.body || []).length) p.push(l.body.join('، '));
+  if (l.libido) p.push('رغبة ' + l.libido);
+  if (l.exercise && l.exercise !== 'لا') p.push('رياضة ' + l.exercise);
+  if (l.sex && l.sex !== 'لا') p.push('علاقة ' + l.sex);
   if ((l.symptoms || []).length) p.push(l.symptoms.join('، '));
   if (pn.level > 0 || (pn.types || []).length) p.push('ألم ' + (pn.level || 0) + '/10' + ((pn.types || []).length ? ' (' + pn.types.join('، ') + ')' : ''));
   if (l.mood) p.push('مزاج ' + l.mood);
@@ -194,7 +202,7 @@ function logSummary(l) {
 let route = 'today';
 let draft = null;
 let ui = { month: new Date().getMonth(), year: new Date().getFullYear(), sel: today(), tab: 'sum', cat: 'الكل', n: 6, articles: null, fetched: false, logDate: today(), back: '', msg: '', snooze: '', snoozeEnd: '' };
-const blankLog = () => ({bleeding:'',discharge:'',symptoms:[],mood:'',sleep:'',stress:'',note:'',pain:{types:[],level:0,triggers:[],helped:[]}});
+const blankLog = () => ({bleeding:'',discharge:'',dcolor:'',smell:'',energy:'',appetite:'',body:[],libido:'',exercise:'',sex:'',symptoms:[],mood:'',sleep:'',stress:'',note:'',pain:{types:[],level:0,triggers:[],helped:[]}});
 function ensureDraft() {
   if (!draft) {
     const old = S.logs[ui.logDate];
@@ -308,6 +316,14 @@ V.calendar = () => {
   </div>` + nav();
 };
 
+function dnote(l) {
+  const bl = l.bleeding && l.bleeding !== 'لا يوجد';
+  let m = '';
+  if (['أصفر', 'أخضر أو رمادي'].includes(l.dcolor) || l.smell === 'كريهة') m = 'إفرازات بهذا اللون أو الرائحة، خاصة مع حكة أو حرقان أو ألم، تستدعي مراجعة طبيبة لاستبعاد التهاب.';
+  else if (!bl && ['بني', 'أحمر', 'وردي'].includes(l.dcolor)) m = 'لون دموي أو بني خارج أيام النزيف قد يكون تبقيعاً، وهو شائع قبل الدورة أو بعدها بيوم أو يومين. إن تكرر في منتصف الدورة أو استمر فاذكريه لطبيبتك.';
+  else if (bl && l.dcolor === 'بني') m = 'اللون البني في بداية الدورة أو نهايتها طبيعي، وهو دم قديم.';
+  return m ? `<div class="note tl"><span>${m}</span></div>` : '';
+}
 V.log = () => {
   ensureDraft();
   const g = (t, p, o, m) => `<div class="sec"><h2>${t}</h2>${chips(p, o, m)}</div>`;
@@ -316,7 +332,16 @@ V.log = () => {
     ${g('النزيف', 'bleeding', ['لا يوجد','خفيف','متوسط','غزير'])}
     <span class="mut" style="margin-top:-6px">تحديد كمية نزيف يضيف هذا اليوم إلى أيام دورتك، وكل يوم مستقل عن غيره.</span>
     ${g('الإفرازات', 'discharge', ['لا يوجد','قليلة','كريمية','مائية','شفافة مطاطية'])}
-    ${g('الأعراض', 'symptoms', ['تقلصات','صداع','انتفاخ','ألم الظهر','إرهاق','حب الشباب'], true)}
+    ${g('لون الإفرازات', 'dcolor', ['شفاف','أبيض','وردي','أحمر','بني','أصفر','أخضر أو رمادي'])}
+    ${g('رائحة الإفرازات', 'smell', ['عادية','قوية','كريهة'])}
+    ${dnote(draft)}
+    ${g('الأعراض', 'symptoms', ['تقلصات','صداع','انتفاخ','ألم الظهر','إرهاق','حب الشباب','دوخة','ألم الثديين','تعرق ليلي','تساقط شعر','ألم المفاصل'], true)}
+    ${g('النشاط والطاقة', 'energy', ['نشيطة جداً','نشيطة','عادي','متعبة','منهكة','خاملة'])}
+    ${g('الشهية', 'appetite', ['عادية','زائدة','قليلة','اشتهاء حلويات'])}
+    ${g('الهضم والجسم', 'body', ['غثيان','إمساك','إسهال','حرقة معدة','احتباس سوائل','قشعريرة'], true)}
+    ${g('الرغبة', 'libido', ['منخفضة','عادية','مرتفعة'])}
+    ${g('الرياضة', 'exercise', ['لا','مشي أو خفيفة','متوسطة','شاقة'])}
+    ${g('علاقة زوجية', 'sex', ['لا','بحماية','بدون حماية'])}
     ${g('المزاج', 'mood', ['هادئة','سعيدة','قلقة','حزينة','عصبية'])}
     ${g('النوم', 'sleep', ['جيد','متوسط','سيئ'])}
     ${g('التوتر', 'stress', ['منخفض','متوسط','مرتفع'])}
