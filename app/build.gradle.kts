@@ -16,8 +16,8 @@ android {
         applicationId = "com.myperiod.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
     }
 
     // مفتاح توقيع ثابت للتجربة الشخصية، ليبقى SHA-1 نفسه في كل بناء (مطلوب لتسجيل Google)

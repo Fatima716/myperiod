@@ -16,24 +16,32 @@ const TIPS = [
   {cat:'صحة',title:'الإفرازات الشفافة المطاطية تدل غالباً على قرب الإباضة',meta:'فهم الإفرازات'}
 ];
 const DEF = () => ({starts:[],logs:{},cycleLen:28,periodLen:5,height:'',weights:[],
-  ends:{},habit:{since:null,history:[],start:null,events:null},fast:{total:0,done:0},
+  ends:{},pdays:null,noBleed:{},habit:{since:null,history:[],start:null,events:null},fast:{total:0,done:0},
   settings:{lock:false,pin:'',dark:false,hijri:true,before:true,fertile:true,daily:true,meds:false},updatedAt:0});
 
 let S;
 try { S = Object.assign(DEF(), JSON.parse(localStorage.getItem('myperiod') || '{}')); } catch (e) { S = DEF(); }
 function fix() {
   S.settings = Object.assign(DEF().settings, S.settings);
-  S.ends = S.ends || {};
+  S.noBleed = S.noBleed || {};
   const H = S.habit = Object.assign({since:null,history:[],start:null,events:null}, S.habit);
   if (!H.events) {
     H.events = (H.history || []).map((x, i) => ({id: i + 1, d: x.to, type: 'ممارسة', trig: [], note: '(من النسخة السابقة)'}));
     if (!(H.history || []).length && H.since) H.start = H.since;
   }
+  if (!Array.isArray(S.pdays)) {
+    // ترحيل: تحويل البدايات والنهايات القديمة إلى أيام نزيف فردية
+    S.pdays = [];
+    const e = S.ends || {}, t = today();
+    (S.starts || []).forEach(x => { const n = e[x] ? diff(e[x], x) + 1 : S.periodLen; for (let k = 0; k < n; k++) { const d = add(x, k); if (d <= t) S.pdays.push(d); } });
+    S.pdays = [...new Set(S.pdays)].sort();
+  }
+  rebuild();
 }
-fix();
 const hasNative = () => typeof Android !== 'undefined';
 let afterT = null;
 function save(noSync) {
+  rebuild();
   if (!noSync) S.updatedAt = Date.now();
   try { localStorage.setItem('myperiod', JSON.stringify(S)); } catch (e) {}
   if (noSync) return;
@@ -107,8 +115,9 @@ function info() {
   return { ...c, t, day, next, ovu, toNext: diff(next, t), toOvu: diff(ovu, t) };
 }
 function dayType(d) {
-  const c = cyc();
-  for (const s of c.st) { const k = diff(d, s); if (k >= 0 && k < periodLenOf(s)) return 'period'; }
+  if (S.pdays.includes(d)) return 'period';
+  const c = cyc(), ps = periods(), lp = ps[ps.length - 1];
+  if (lp && lp.open && diff(d, lp.end) > 0 && diff(d, lp.start) < plen()) return 'pred';
   if (c.last) {
     for (let k = 1; k <= 8; k++) {
       const ns = add(c.last, c.avg * k);
@@ -123,42 +132,51 @@ function cycleDayOf(d) {
   for (const x of c.st) if (x <= d) s = x;
   return s ? diff(d, s) + 1 : null;
 }
-function plens() { const o = []; for (const s of Object.keys(S.ends)) { const l = diff(S.ends[s], s) + 1; if (l >= 1 && l <= 14) o.push(l); } return o; }
+function periods() {
+  const pd = [...new Set(S.pdays)].sort(), out = [], t = today();
+  for (const d of pd) { const l = out[out.length - 1]; if (l && diff(d, l.end) <= 3) { l.end = d; l.days++; } else out.push({start: d, end: d, days: 1}); }
+  out.forEach(p => { p.open = diff(t, p.end) <= 1; });
+  return out;
+}
+function rebuild() {
+  const ps = periods();
+  S.starts = ps.map(p => p.start);
+  S.ends = {}; ps.forEach(p => { if (!p.open) S.ends[p.start] = p.end; });
+}
+function plens() { return periods().filter(p => !p.open && p.days >= 1 && p.days <= 14).map(p => p.days); }
 function plen() { const o = plens(); return o.length ? Math.round(avgOf(o)) : S.periodLen; }
-function periodLenOf(s) { const e = S.ends[s]; return e ? diff(e, s) + 1 : plen(); }
 const dw = n => n === 1 ? 'يوم' : n === 2 ? 'يومين' : n <= 10 ? n + ' أيام' : n + ' يومًا';
 const bw = n => n === 1 ? 'بيوم واحد' : n === 2 ? 'بيومين' : 'بـ ' + dw(n);
 const devText = d => d === 0 ? 'جاءت في موعدها المتوقع تماماً' : d < 0 ? 'جاءت أبكر ' + bw(-d) : 'تأخرت ' + (d === 1 ? 'يوماً واحداً' : dw(d));
 function devs() {
-  const st = cyc().st, out = [];
+  const st = cyc().st, out = [], pm = {};
+  periods().forEach(p => pm[p.start] = p);
   for (let i = 1; i < st.length; i++) {
     const gaps = []; for (let j = 1; j < i; j++) gaps.push(diff(st[j], st[j - 1]));
     const ok = gaps.filter(x => x >= 18 && x <= 50);
     const avg = ok.length ? Math.round(avgOf(ok)) : S.cycleLen;
     const pred = add(st[i - 1], avg);
-    out.push({start: st[i], predicted: pred, dev: diff(st[i], pred), gap: diff(st[i], st[i - 1]), len: S.ends[st[i]] ? diff(S.ends[st[i]], st[i]) + 1 : null});
+    out.push({start: st[i], predicted: pred, dev: diff(st[i], pred), gap: diff(st[i], st[i - 1]), len: pm[st[i]] && !pm[st[i]].open ? pm[st[i]].days : null});
   }
   return out;
 }
-function addPeriodStart(d) {
+function addPday(d) {
   if (!d || d > today()) { toast('تاريخ غير صالح'); return false; }
-  if (S.starts.includes(d)) { toast('هذه البداية مسجّلة مسبقاً'); return false; }
-  if (S.starts.some(x => Math.abs(diff(d, x)) < 10)) { toast('قريبة جداً من بداية دورة أخرى مسجّلة'); return false; }
-  const c = cyc(), pred = c.last && d > c.last ? add(c.last, c.avg) : null;
-  S.starts.push(d); S.starts.sort(); save();
+  if (S.pdays.includes(d)) return true;
+  const ps = periods(), lp = ps[ps.length - 1], c = cyc();
+  const pred = lp && d > lp.end && diff(d, lp.end) > 3 && c.last ? add(c.last, c.avg) : null;
+  S.pdays.push(d); S.pdays.sort(); save();
   const dv = pred ? diff(d, pred) : 0;
   ui.msg = pred ? devText(dv) + (dv === 0 ? ' (' : ' عن التوقع (') + longDate(pred) + '). تم تحديث توقعاتك.' : '';
   return true;
 }
-function setPeriodEnd(d) {
-  if (!d || d > today()) { toast('تاريخ غير صالح'); return false; }
-  const before = cyc().st.filter(x => x <= d), s = before[before.length - 1];
-  if (!s || diff(d, s) > 13) { toast('لا توجد بداية دورة قبل هذا التاريخ'); return false; }
-  const others = plens(); S.ends[s] = d; save();
-  const len = diff(d, s) + 1, usual = others.length ? Math.round(avgOf(others)) : S.periodLen;
-  ui.msg = 'استمرت دورتك ' + dw(len) + (len === usual ? '، وهذا المعتاد.' : len > usual ? '، أطول من المعتاد ' + bw(len - usual) + '.' : '، أقصر من المعتاد ' + bw(usual - len) + '.');
-  return true;
+function removePday(d) { S.pdays = S.pdays.filter(x => x !== d); save(); }
+function addRange(a, n) {
+  if (!addPday(a)) return;
+  for (let k = 1; k < n; k++) { const d = add(a, k); if (d <= today() && !S.pdays.includes(d)) S.pdays.push(d); }
+  S.pdays.sort(); save();
 }
+const lenMsg = (len, usual) => 'استمرت دورتك ' + dw(len) + (len === usual ? '، وهذا المعتاد.' : len > usual ? '، أطول من المعتاد ' + bw(len - usual) + '.' : '، أقصر من المعتاد ' + bw(usual - len) + '.');
 function logSummary(l) {
   const p = [], pn = l.pain || {};
   if (l.bleeding && l.bleeding !== 'لا يوجد') p.push('نزيف ' + l.bleeding);
@@ -243,8 +261,9 @@ V.today = () => {
   const late = i.toNext < 0;
   let ask = '';
   if (ui.msg) ask += `<div class="note tl" style="width:100%"><span>${esc(ui.msg)}</span><br><button class="chip" style="margin-top:8px" data-act="dismissMsg">حسناً</button></div>`;
-  if (i.toNext <= 0 && ui.snooze !== t) ask += `<div class="card" style="width:100%"><h2>هل جاءتك الدورة؟</h2><span class="mut">كانت متوقعة ${i.toNext === 0 ? 'اليوم' : 'منذ ' + dw(-i.toNext)}. إجابتك تجعل التوقعات أدق.</span><button class="btn" data-act="startPeriod">نعم، بدأت اليوم</button><label for="sb">أو بدأت في يوم سابق</label><input id="sb" type="date" max="${t}" data-in="lastStart"><button class="chip" data-act="snooze">لم تأتِ بعد</button></div>`;
-  if (i.day >= 2 && i.day <= 14 && !S.ends[i.last] && ui.snoozeEnd !== t) ask += `<div class="card" style="width:100%"><h2>هل انتهت دورتك؟</h2><span class="mut">اليوم ${i.day} من الدورة. سجّلي النهاية لأقارن مدتها بالمعتاد.</span><button class="btn" data-act="endToday">انتهت اليوم</button><label for="ed">أو انتهت في يوم سابق</label><input id="ed" type="date" min="${i.last}" max="${t}" data-in="endDate"><button class="chip" data-act="snoozeEnd">ما زالت مستمرة</button></div>`;
+  const ps = periods(), lp = ps[ps.length - 1];
+  if (i.toNext <= 0 && !S.pdays.includes(t) && ui.snooze !== t) ask += `<div class="card" style="width:100%"><h2>هل جاءتك الدورة؟</h2><span class="mut">كانت متوقعة ${i.toNext === 0 ? 'اليوم' : 'منذ ' + dw(-i.toNext)}. إجابتك تجعل التوقعات أدق.</span><button class="btn" data-act="startPeriod">نعم، اليوم أول يوم</button><label for="sb">أو بدأت في يوم سابق</label><input id="sb" type="date" max="${t}" data-in="lastStart"><button class="chip" data-act="snooze">لم تأتِ بعد</button></div>`;
+  if (lp && lp.open && diff(t, lp.end) === 1 && !S.noBleed[t] && !(S.logs[t] && S.logs[t].bleeding)) ask += `<div class="card" style="width:100%"><h2>هل ما زال النزيف مستمراً اليوم؟</h2><span class="mut">سجّلتِ ${dw(lp.days)} من النزيف حتى الآن. كل يوم يُحسب وحده.</span><button class="btn" data-act="stillBleeding">نعم، ما زال مستمراً</button><button class="chip" data-act="endToday">لا، انتهت دورتي</button></div>`;
   return h + `<div class="body" style="align-items:center">${ask}
     <div style="position:relative;width:260px;height:260px"><svg width="260" height="260" viewBox="0 0 260 260" role="img" aria-label="اليوم ${i.day} من الدورة">
       <g transform="rotate(-90 130 130)" fill="none" stroke-width="18">
@@ -277,9 +296,7 @@ V.calendar = () => {
   let title = ty === 'period' ? 'أيام الدورة' : ty === 'pred' ? 'دورة متوقعة' : ty === 'fertile' ? 'فترة الخصوبة' : 'يوم عادي';
   const sm = lg ? logSummary(lg) : '';
   const body = lg ? (sm || 'سجل بدون تفاصيل') : 'لا توجد أعراض مسجّلة لهذا اليوم.';
-  const logged = S.starts.some(x => { const k = diff(ui.sel, x); return k >= 0 && k < periodLenOf(x); });
-  const bs = cyc().st.filter(x => x <= ui.sel), os = bs[bs.length - 1];
-  const canEnd = os && diff(ui.sel, os) >= 0 && diff(ui.sel, os) <= 13 && ui.sel <= t;
+  const isP = S.pdays.includes(ui.sel);
   const past = ui.sel <= t;
   return head(y, MONTHS[m]) + `<div class="body">
     <div class="sp"><button class="chip" data-act="mon" data-n="-1" aria-label="الشهر السابق">السابق</button><button class="chip" data-act="mon" data-n="1" aria-label="الشهر التالي">التالي</button></div>
@@ -287,8 +304,7 @@ V.calendar = () => {
     <div class="sp mut" style="justify-content:center;gap:16px"><span>● أيام الدورة</span><span class="pink">● متوقعة</span><span class="teal">● الخصوبة</span></div>
     <div class="card"><span class="mut">${longDate(ui.sel)}${cd ? ' · اليوم ' + cd + ' من الدورة' : ''}</span><b style="font-size:18px">${title}</b><span class="mut">${esc(body)}</span>
       ${past ? `<button class="chip" data-act="editLog" data-d="${ui.sel}">${lg ? 'عرض وتعديل سجل هذا اليوم' : 'تسجيل أعراض هذا اليوم'}</button>` : ''}
-      ${logged ? `<button class="chip" data-act="unmark" data-d="${ui.sel}">إزالة هذه الدورة من السجل</button>` : past ? `<button class="chip" data-act="mark" data-d="${ui.sel}">بدأت دورتي في هذا اليوم</button>` : ''}
-      ${canEnd ? `<button class="chip" data-act="markEnd" data-d="${ui.sel}">انتهت دورتي في هذا اليوم</button>` : ''}</div>
+      ${isP ? `<button class="chip" data-act="unmark" data-d="${ui.sel}">إزالة هذا اليوم من أيام الدورة</button>` : past ? `<button class="chip" data-act="mark" data-d="${ui.sel}">هذا اليوم من أيام دورتي</button>` : ''}</div>
   </div>` + nav();
 };
 
@@ -298,6 +314,7 @@ V.log = () => {
   return head(longDate(ui.logDate), ui.logDate === today() ? 'كيف تشعرين اليوم؟' : 'سجل يوم سابق') + `<div class="body">
     <div class="sec"><label for="ld">تاريخ السجل</label><input id="ld" type="date" max="${today()}" value="${ui.logDate}" data-in="logDate"></div>
     ${g('النزيف', 'bleeding', ['لا يوجد','خفيف','متوسط','غزير'])}
+    <span class="mut" style="margin-top:-6px">تحديد كمية نزيف يضيف هذا اليوم إلى أيام دورتك، وكل يوم مستقل عن غيره.</span>
     ${g('الإفرازات', 'discharge', ['لا يوجد','قليلة','كريمية','مائية','شفافة مطاطية'])}
     ${g('الأعراض', 'symptoms', ['تقلصات','صداع','انتفاخ','ألم الظهر','إرهاق','حب الشباب'], true)}
     ${g('المزاج', 'mood', ['هادئة','سعيدة','قلقة','حزينة','عصبية'])}
@@ -437,14 +454,14 @@ V.habit = () => {
 
 V.records = () => {
   const c = cyc(), t = today();
-  const periods = c.st.slice().reverse().map(x => { const e = S.ends[x]; return `<div class="sp"><span><b>${longDate(x)}</b><br><span class="mut">${e ? 'إلى ' + longDate(e) + ' (' + dw(diff(e, x) + 1) + ')' : 'لم تُسجَّل نهايتها'}</span></span><button class="chip" style="min-height:36px;padding:0 12px" data-act="delPeriod" data-s="${x}">حذف</button></div>`; }).join('');
+  const plist = periods().slice().reverse().map(p => `<div class="sp"><span><b>${longDate(p.start)}</b><br><span class="mut">${p.start === p.end ? 'يوم واحد' : 'إلى ' + longDate(p.end) + ' · ' + dw(p.days) + ' من النزيف'}</span></span><button class="chip" style="min-height:36px;padding:0 12px" data-act="delPeriod" data-s="${p.start}">حذف</button></div>`).join('');
   const logsH = Object.keys(S.logs).sort().reverse().map(d => { const sm = logSummary(S.logs[d]), cd = cycleDayOf(d); return `<div class="card"><div class="sp"><b>${longDate(d)}${cd ? ' · يوم ' + cd : ''}</b><span style="display:flex;gap:6px"><button class="chip" style="min-height:36px;padding:0 12px" data-act="editLog" data-d="${d}">تعديل</button><button class="chip" style="min-height:36px;padding:0 12px" data-act="delLog" data-d="${d}">حذف</button></span></div><span class="mut">${esc(sm || 'بدون تفاصيل')}</span></div>`; }).join('');
   return head('كل ما سجّلتِه', 'سجلاتي') + `<div class="body">
-    <div class="card"><h2>إضافة دورة سابقة</h2><span class="mut">أدخلي دورات قديمة ليتعلّم التطبيق من تاريخك وتتحسن التوقعات.</span>
-      <label for="ops">بداية الدورة</label><input id="ops" type="date" max="${t}"><label for="ope">نهايتها (اختياري)</label><input id="ope" type="date" max="${t}"><button class="btn" data-act="addOld">إضافة</button></div>
+    <div class="card"><h2>إضافة دورة سابقة</h2><span class="mut">أدخلي دورات قديمة ليتعلّم التطبيق من تاريخك. تُسجَّل كل الأيام بين الأول والأخير، ويمكنك تعديل أي يوم لاحقاً من التقويم.</span>
+      <label for="ops">أول يوم نزيف</label><input id="ops" type="date" max="${t}"><label for="ope">آخر يوم نزيف (اختياري)</label><input id="ope" type="date" max="${t}"><button class="btn" data-act="addOld">إضافة</button></div>
     <div class="card"><h2>تسجيل يوم سابق</h2><span class="mut">أعراض أو ألم أو ملاحظات ليوم قديم.</span><input id="opd" type="date" max="${t}" aria-label="تاريخ اليوم"><button class="btn ghost" data-act="openOldDay">فتح سجل هذا اليوم</button></div>
     ${linkBtn('habit', 'تحدّيي', 'أضيفي أحداثاً قديمة بتاريخها')}${linkBtn('body', 'كتلة الجسم', 'أضيفي قياسات قديمة بتاريخها')}
-    ${periods ? `<div class="card"><h2>الدورات المسجّلة</h2>${periods}</div>` : ''}
+    ${plist ? `<div class="card"><h2>الدورات المسجّلة</h2>${plist}</div>` : ''}
     <h2 style="margin:4px 0 0;font-size:16px">سجلات الأيام</h2>${logsH || '<span class="mut">لا سجلات بعد.</span>'}</div>` + nav();
 };
 
@@ -530,6 +547,7 @@ function flowerSvg() {
 
 /* ---------- عرض وأحداث ---------- */
 function render() {
+  rebuild();
   document.body.classList.toggle('dark', !!S.settings.dark);
   const sc = document.querySelector('.body'); const top = sc ? sc.scrollTop : 0;
   const fn = V[route] || V.today;
@@ -547,8 +565,11 @@ window.goBack = () => {
 };
 
 function saveLog() {
-  const d = ui.logDate, l = draft;
+  const d = ui.logDate, l = draft, old = S.logs[d];
+  const bleed = b => b && b !== 'لا يوجد';
   if (logSummary(l)) S.logs[d] = l; else delete S.logs[d];
+  if (bleed(l.bleeding)) addPday(d);
+  else if (l.bleeding === 'لا يوجد' || bleed(old && old.bleeding)) removePday(d);
   save(); toast('تم الحفظ');
   const b = ui.back; ui.back = ''; go(b || 'today');
 }
@@ -570,28 +591,33 @@ const A = {
   },
   lvl: el => { draft.pain.level = +el.dataset.n; render(); },
   saveLog,
-  startPeriod: () => { if (addPeriodStart(today())) toast(ui.msg || 'تم تسجيل بداية الدورة'); render(); },
+  startPeriod: () => { if (addPday(today())) toast(ui.msg || 'سُجّل اليوم من أيام دورتك'); render(); },
   pick: el => { ui.sel = el.dataset.d; render(); },
   mon: el => { let m = ui.month + +el.dataset.n, y = ui.year; if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; } ui.month = m; ui.year = y; render(); },
-  mark: el => { if (addPeriodStart(el.dataset.d)) toast(ui.msg || 'تم تسجيل بداية الدورة'); render(); },
-  unmark: el => { const d = el.dataset.d; const x = S.starts.find(y => { const k = diff(d, y); return k >= 0 && k < periodLenOf(y); }); if (x) { S.starts = S.starts.filter(y => y !== x); delete S.ends[x]; save(); } render(); },
+  mark: el => { if (addPday(el.dataset.d)) toast(ui.msg || 'أُضيف اليوم إلى أيام دورتك'); render(); },
+  unmark: el => { removePday(el.dataset.d); render(); },
   tab: el => { ui.tab = el.dataset.t; render(); },
   saveBody: () => { const w = document.getElementById('w').value, d = (document.getElementById('wd') || {}).value || today(); if (parseFloat(w) > 0) { S.weights = S.weights.filter(x => x.d !== d); S.weights.push({d, w}); S.weights.sort((a, b) => a.d < b.d ? -1 : 1); } save(); toast('تم حفظ القياس'); render(); },
   dismissMsg: () => { ui.msg = ''; render(); },
   snooze: () => { ui.snooze = today(); render(); },
   snoozeEnd: () => { ui.snoozeEnd = today(); render(); },
-  endToday: () => { if (setPeriodEnd(today())) toast(ui.msg); render(); },
-  markEnd: el => { if (setPeriodEnd(el.dataset.d)) toast(ui.msg); render(); },
+  stillBleeding: () => { addPday(today()); toast('سُجّل اليوم من أيام دورتك'); render(); },
+  endToday: () => {
+    const lp = periods().slice(-1)[0]; if (!lp) return;
+    const o = plens(), usual = o.length ? Math.round(avgOf(o)) : S.periodLen;
+    S.noBleed[today()] = true; ui.msg = lenMsg(lp.days, usual); save(); render();
+  },
   editLog: el => { ui.logDate = el.dataset.d; ui.back = route; draft = null; go('log'); },
   delLog: el => { if (confirm('حذف سجل هذا اليوم؟')) { delete S.logs[el.dataset.d]; save(); render(); } },
-  delPeriod: el => { if (confirm('حذف هذه الدورة من السجل؟')) { const x = el.dataset.s; S.starts = S.starts.filter(y => y !== x); delete S.ends[x]; save(); render(); } },
+  delPeriod: el => { if (confirm('حذف هذه الدورة من السجل؟')) { const p = periods().find(x => x.start === el.dataset.s); if (p) { S.pdays = S.pdays.filter(d => d < p.start || d > p.end); save(); } render(); } },
   addOld: () => {
     const a = document.getElementById('ops').value, e = document.getElementById('ope').value;
-    if (!a) { toast('اختاري تاريخ البداية'); return; }
-    if (e && e < a) { toast('النهاية قبل البداية'); return; }
-    if (!addPeriodStart(a)) return;
-    const ok = e ? setPeriodEnd(e) : true; ui.msg = '';
-    if (ok) toast('تمت إضافة الدورة'); render();
+    if (!a) { toast('اختاري أول يوم نزيف'); return; }
+    if (e && e < a) { toast('آخر يوم قبل أول يوم'); return; }
+    if (e && diff(e, a) > 13) { toast('المدة أطول من 14 يوماً'); return; }
+    if (a > today() || (e && e > today())) { toast('تاريخ غير صالح'); return; }
+    const n = e ? diff(e, a) + 1 : 1;
+    addRange(a, n); ui.msg = ''; toast('تمت إضافة ' + dw(n) + ' إلى أيام الدورة'); render();
   },
   openOldDay: () => { const d = document.getElementById('opd').value; if (!d) { toast('اختاري التاريخ'); return; } ui.logDate = d; ui.back = 'records'; draft = null; go('log'); },
   habitStart: () => { S.habit.start = today(); save(); render(); },
@@ -640,14 +666,14 @@ document.addEventListener('input', e => {
   else if (k === 'fastTotal') { S.fast.total = Math.max(0, parseInt(v) || 0); save(); }
   else if (k === 'cycleLen') { const n = parseInt(v); if (n >= 18 && n <= 50) { S.cycleLen = n; save(); } }
   else if (k === 'periodLen') { const n = parseInt(v); if (n >= 1 && n <= 12) { S.periodLen = n; save(); } }
-  else if (k === 'lastStart') { if (v && addPeriodStart(v)) { toast(ui.msg || 'تم تسجيل بداية الدورة'); render(); } }
-  else if (k === 'endDate') { if (v && setPeriodEnd(v)) { toast(ui.msg); render(); } }
+  else if (k === 'lastStart') { if (v && v <= today()) { addRange(v, Math.min(diff(today(), v), plen() - 1) + 1); toast(ui.msg || 'سُجّلت أيام دورتك'); render(); } }
   else if (k === 'logDate') { if (v && v <= today()) { ui.logDate = v; draft = null; render(); } }
   else if (k === 'hDate') { if (draft && draft.h) draft.h.d = v; }
   else if (k === 'hNote') { if (draft && draft.h) draft.h.note = v; }
   else if (k === 'habitLast') { if (v && v <= today()) { S.habit.events.push({id: nextEvId(), d: v, type: HP, trig: [], note: ''}); save(); render(); } }
 });
 
+fix();
 lockScreen();
 if (hasNative() && Android.user) { try { ui.email = Android.user() || ''; } catch (e) {} }
 render();
